@@ -1,0 +1,13 @@
+# macOS / 에디터 찌꺼기
+.DS_Store
+
+# Python 캐시
+__pycache__/
+*.pyc
+
+# 로컬 DB 데이터 / 볼륨 (절대 커밋 안 함)
+data/
+
+# 백업 파일
+*.bak
+*.bak2
