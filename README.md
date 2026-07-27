@@ -1,6 +1,6 @@
 # 구독 서비스 데이터 파이프라인 (Subscription Data Pipeline)
 
-가짜 SaaS 구독 서비스의 데이터를 **운영 DB → 데이터 파이프라인 → 데이터웨어하우스 → 대시보드**까지 흐르게 만든 엔드투엔드 데이터 엔지니어링 프로젝트입니다. Docker 위에서 PostgreSQL · Apache Airflow · Metabase를 띄워, 실제 회사의 데이터 인프라를 로컬에서 재현했습니다.
+가상의 SaaS 구독 서비스의 데이터를 **운영 DB → 데이터 파이프라인 → 데이터웨어하우스 → 대시보드**까지 흐르게 만든 엔드투엔드 데이터 엔지니어링 프로젝트입니다. Docker 위에서 PostgreSQL · Apache Airflow · Metabase를 띄워, 실제 회사의 데이터 인프라를 로컬에서 재현했습니다.
 
 ## 왜 만들었나
 
@@ -11,7 +11,7 @@
 ## 아키텍처
 
 ```
-generate_fake_data.py                 ← 가짜 데이터 생성 (Faker)
+generate_fake_data.py                 ← 합성 데이터 생성 (Faker)
         │
         ▼
 ┌──────────────────────┐
@@ -69,7 +69,7 @@ generate_fake_data.py                 ← 가짜 데이터 생성 (Faker)
 # 1. 인프라 전체 실행 (처음엔 이미지 다운로드로 3~5분)
 docker compose up -d
 
-# 2. 가짜 데이터 생성 (과거 90일치를 OLTP에 적재)
+# 2. 합성 데이터 생성 (과거 90일치를 OLTP에 적재)
 pip install psycopg2-binary faker pandas
 DB_HOST=localhost python3 scripts/generate_fake_data.py
 
@@ -94,7 +94,7 @@ subscription-data-pipeline/
 ├── dags/
 │   └── subscription_pipeline.py  # Airflow ETL DAG (4 tasks)
 ├── scripts/
-│   ├── generate_fake_data.py     # 가짜 데이터 생성기
+│   ├── generate_fake_data.py     # 합성 데이터 생성기
 │   └── analytics_queries.sql     # 분석용 SQL 모음
 └── .gitignore
 ```
