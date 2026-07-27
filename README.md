@@ -1,240 +1,137 @@
-# 🚀 가짜 구독 서비스 데이터 파이프라인
+# 구독 서비스 데이터 파이프라인 (Subscription Data Pipeline)
 
-집에서 **복사-붙여넣기만으로** 따라할 수 있는 전체 데이터 엔지니어링 실습 프로젝트입니다.
+가짜 SaaS 구독 서비스의 데이터를 **운영 DB → 데이터 파이프라인 → 데이터웨어하우스 → 대시보드**까지 흐르게 만든 엔드투엔드 데이터 엔지니어링 프로젝트입니다. Docker 위에서 PostgreSQL · Apache Airflow · Metabase를 띄워, 실제 회사의 데이터 인프라를 로컬에서 재현했습니다.
 
-## 📌 이 프로젝트로 배우는 것
+## 왜 만들었나
 
-| 단계 | 기술 | 실무 대응 |
-|------|------|----------|
-| 1 | **Docker** | 인프라 환경 구축 |
-| 2 | **PostgreSQL (OLTP)** | 실시간 운영 데이터베이스 |
-| 3 | **Apache Airflow** | ETL 데이터 파이프라인 스케줄링 |
-| 4 | **DuckDB** | 데이터웨어하우스 (분석용 DB) |
-| 5 | **PostgreSQL (Warehouse)** | BI 연결용 분석 DB |
-| 6 | **Metabase** | 대시보드/리포팅 |
-| 7 | **SQL** | 비즈니스 지표 분석 (MRR, Churn, ARPU) |
+이전 회사에서 SAP 같은 시스템의 데이터를 **KNIME으로 ETL하고 Power BI로 대시보드**를 만들면서, 회사의 데이터 시스템이 실제로 어떻게 구성되고 연결되는지 궁금해졌다. 특히 빠르게 성장하는 산업 — 그 중심에 있는 테크 업계의 데이터 시스템을 직접 경험해보고 싶었다. 데이터가 어떻게 **저장되고, 가공되어, 실무자가 분석할 수 있는 테이블로 만들어지는지**를 내 손으로 이해하기 위해 전체 파이프라인을 구현했다.
 
 ---
 
-## 🏗️ 전체 아키텍처
+## 아키텍처
 
 ```
-┌─────────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  가짜 데이터    │────▶│  PostgreSQL  │────▶│   Apache Airflow │
-│  생성 스크립트   │     │   (OLTP)     │     │   (ETL 파이프라인)│
-└─────────────────┘     └──────────────┘     └────────┬────────┘
-                                                       │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │     DuckDB      │
-                                              │  (데이터웨어하우스)│
-                                              └────────┬────────┘
-                                                       │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │  PostgreSQL     │
-                                              │  (Warehouse)    │
-                                              └────────┬────────┘
-                                                       │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │    Metabase     │
-                                              │   (대시보드)     │
-                                              └─────────────────┘
+generate_fake_data.py                 ← 가짜 데이터 생성 (Faker)
+        │
+        ▼
+┌──────────────────────┐
+│  PostgreSQL (OLTP)   │  운영 DB · subscription_db
+│  users / subscriptions / payments
+└──────────┬───────────┘
+           │   ┌─────────────  Apache Airflow DAG  ─────────────┐
+           ▼   │  extract_load → transform_and_load →           │
+┌──────────────────────┐  compute_metrics → sync_check          │
+│ PostgreSQL (Warehouse)│  분석 DB · analytics_db                │
+│  raw_*  →  dim_* / fact_*  →  mart_*                           │
+└──────────┬───────────┘                                        │
+           │   └────────────────────────────────────────────────┘
+           ▼
+┌──────────────────────┐
+│      Metabase        │  SQL 조회 + 대시보드
+└──────────────────────┘
 ```
 
+## 기술 스택
+
+| 계층 | 도구 | 역할 |
+|------|------|------|
+| 인프라 | **Docker Compose** | 모든 서비스를 한 번에 실행 |
+| 운영 DB (OLTP) | **PostgreSQL** | 서비스 데이터가 실시간으로 쌓이는 원천 |
+| 파이프라인 | **Apache Airflow** | ETL 자동화 및 스케줄링 (DAG) |
+| 데이터웨어하우스 | **PostgreSQL** | 분석용으로 정리한 raw / dim·fact / mart |
+| BI | **Metabase** | SQL 분석 및 대시보드 |
+| 분석 | **SQL** | MRR, Churn, ARPU 등 비즈니스 지표 |
+
+## 데이터 모델 (별 스키마)
+
+- **raw_** : OLTP에서 그대로 복사해온 원본 (`raw_users`, `raw_subscriptions`, `raw_payments`)
+- **dim_ / fact_** : 분석하기 좋게 가공한 차원·사실 테이블 (`dim_users`, `dim_plans`, `fact_subscriptions`, `fact_payments`)
+- **mart_** : 질문별로 미리 집계한 최종 표 (`mart_mrr_daily`, `mart_churn_monthly`, `mart_revenue_by_country`, `mart_user_cohort`)
+
+## Airflow DAG (`subscription_pipeline`)
+
+| 태스크 | 하는 일 |
+|--------|---------|
+| `extract_load` | OLTP의 users/subscriptions/payments를 웨어하우스 `raw_*`로 복사 (pandas `to_sql`, 날짜 타입 보존) |
+| `transform_and_load` | `raw_*`를 SQL로 가공해 `dim_*` / `fact_*` 생성 |
+| `compute_metrics` | `dim`·`fact`를 집계해 `mart_*` (MRR·Churn·국가별 매출·코호트) 생성 |
+| `sync_check` | 결과 행 수를 확인해 파이프라인 정상 여부 검증 |
+
+> 태스크끼리 데이터를 넘기지 않고 각 단계가 DB에서 직접 읽고 쓰는 구조로, XCom을 통한 대용량 데이터 전달을 피했습니다.
+
 ---
 
-## ✅ 사전 준비
+## 실행 방법
 
-- **Docker Desktop** 설치 (Windows/Mac) 또는 Linux에 Docker + Docker Compose 설치
-- 약 **4GB 이상의 여유 RAM** 권장
-
-> Docker 설치: https://docs.docker.com/get-docker/
-
----
-
-## 🚀 빠른 시작 (5분)
-
-### 1. 프로젝트 다운로드
-
-이 폴더(`subscription-data-pipeline`)를 원하는 위치에 압축 해제합니다.
+**사전 준비:** Docker Desktop, 여유 RAM 4GB+
 
 ```bash
-cd subscription-data-pipeline
+# 1. 인프라 전체 실행 (처음엔 이미지 다운로드로 3~5분)
+docker compose up -d
+
+# 2. 가짜 데이터 생성 (과거 90일치를 OLTP에 적재)
+pip install psycopg2-binary faker pandas
+DB_HOST=localhost python3 scripts/generate_fake_data.py
+
+# 3. Airflow에서 파이프라인 실행
+#    http://localhost:8080  (admin / admin)
+#    subscription_pipeline DAG → Trigger → 4개 태스크 초록불 확인
+
+# 4. Metabase에서 대시보드
+#    http://localhost:3000  → PostgreSQL 연결:
+#    host: postgres-warehouse · db: analytics_db
+#    user: warehouse_user · pw: warehouse_pass
 ```
 
-### 2. 전체 인프라 띄우기
+> 💡 `docker-compose.yml`의 비밀번호는 **로컬 학습용 임시 크레덴셜**입니다. 실제 운영에서는 환경변수/시크릿으로 분리해야 합니다.
+> ⚠️ 데이터를 초기화하려면 `docker compose down`(데이터 유지) 사용. `-v` 옵션은 볼륨(데이터)까지 삭제하니 주의하세요.
 
-```bash
-docker-compose up -d
-```
-
-> 처음 실행 시 이미지 다운로드 + Airflow 초기화에 **3~5분** 소요됩니다.
-
-### 3. 가짜 데이터 생성 (과거 90일치)
-
-```bash
-docker exec -it oltp-db bash -c "pip install psycopg2-binary faker pandas"
-docker exec -it oltp-db python3 /scripts/generate_fake_data.py
-```
-
-> ⚠️ `generate_fake_data.py`가 컨테이너 안에 없다면 아래 명령어로 복사:
-> ```bash
-> docker cp scripts/generate_fake_data.py oltp-db:/tmp/
-> docker exec -it oltp-db python3 /tmp/generate_fake_data.py
-> ```
-
-### 4. Airflow DAG 수동 실행
-
-브라우저에서 접속: http://localhost:8080
-- ID: `admin`
-- PW: `admin`
-
-1. `subscription_pipeline` DAG 클릭
-2. 왼쪽 상단 ▶️ (Trigger DAG) 버튼 클릭
-3. Graph 탭에서 모든 태스크가 초록색으로 변하는지 확인
-
-### 5. Metabase 대시보드 접속
-
-브라우저에서 접속: http://localhost:3000
-- 최초 가입: 이메일/비밀번호 아무거나 설정
-- **"Add your data"** 클릭 → **PostgreSQL** 선택
-- 설정값:
-  - Host: `postgres-warehouse`
-  - Port: `5432`
-  - Database: `analytics_db`
-  - Username: `warehouse_user`
-  - Password: `warehouse_pass`
-
-### 6. SQL 분석 시작
-
-Metabase에서 **"New → SQL Query"**를 선택하고, `scripts/analytics_queries.sql`의 쿼리를 복사-붙여넣기 해보세요.
-
----
-
-## 📂 프로젝트 구조
+## 프로젝트 구조
 
 ```
 subscription-data-pipeline/
-├── docker-compose.yml          # 전체 인프라 정의
+├── docker-compose.yml            # 전체 인프라 정의 (OLTP·Warehouse·Airflow·Metabase)
 ├── dags/
-│   └── subscription_pipeline.py  # Airflow ETL DAG
+│   └── subscription_pipeline.py  # Airflow ETL DAG (4 tasks)
 ├── scripts/
-│   ├── generate_fake_data.py   # 가짜 데이터 생성기
-│   └── analytics_queries.sql   # 분석용 SQL 모음
-└── data/                       # DuckDB 파일 저장소
+│   ├── generate_fake_data.py     # 가짜 데이터 생성기
+│   └── analytics_queries.sql     # 분석용 SQL 모음
+└── .gitignore
 ```
 
 ---
 
-## 🔍 DAG 상세 흐름
+## 내가 해결한 문제들 (트러블슈팅)
 
-| 태스크 | 설명 |
-|--------|------|
-| `extract_yesterday` | OLTP DB에서 어제 생성된 users, subscriptions, payments 추출 |
-| `transform_and_load` | DuckDB에 raw 데이터 적재 + dim/fact 테이블 재구성 |
-| `compute_metrics` | MRR, Churn Rate, 국가별 매출, 코호트 등 mart 테이블 생성 |
-| `sync_to_postgres` | DuckDB mart 테이블을 PostgreSQL 웨어하우스로 동기화 (Metabase 연결용) |
+파이프라인을 돌리며 실제로 막혔고, 로그를 읽어 원인을 찾아 해결한 기록입니다.
 
----
+> Airflow DAG가 계속 실패(빨간불)해서 처음엔 코드를 여기저기 고쳐봤지만 해결되지 않았다. 로그를 다시 읽으며 근본 원인을 추적한 결과, **태스크 간에 데이터를 JSON으로 주고받는 과정에서 날짜가 숫자로 변환돼** `DATE` 컬럼에 들어가지 못하는 게 문제였다. 데이터 전달 구조 자체를 바꾸자 모든 태스크가 성공(파란불)했고, 웨어하우스와 Metabase까지 데이터가 정상 적재되었다.
 
-## 📊 만들 수 있는 대시보드 예시
+### 1. 날짜가 숫자로 깨져 적재 실패 (`BIGINT → DATE` 캐스팅 에러)
+- **원인:** 태스크 간 데이터를 XCom + `to_json()`으로 넘기는 과정에서 날짜가 밀리초 정수로 변환되어 `DATE` 컬럼에 들어가지 못함.
+- **해결:** XCom 전달 방식을 제거하고 각 태스크가 DB에서 직접 읽고 쓰도록 리팩터링. (부가 효과로 대용량 XCom 안티패턴도 제거)
 
-### 1. MRR 추이 (월별 반복 매출)
-```sql
-SELECT 
-    DATE_TRUNC('month', date) AS month,
-    SUM(daily_revenue) AS mrr
-FROM mart_mrr_daily
-GROUP BY 1
-ORDER BY 1 DESC;
-```
+### 2. 만든 테이블이 저장되지 않음
+- **원인:** SQLAlchemy `.connect()`는 변경사항을 자동 커밋하지 않아, 생성한 테이블이 다음 태스크에서 조회되지 않음.
+- **해결:** `wh_engine.begin()`으로 트랜잭션을 열어 블록 종료 시 자동 커밋되도록 변경.
 
-### 2. Churn Rate 추이
-```sql
-SELECT 
-    month,
-    ROUND(SUM(churned_subscriptions) * 100.0 / SUM(new_subscriptions), 2) AS churn_rate
-FROM mart_churn_monthly
-GROUP BY month
-ORDER BY month DESC;
-```
-
-### 3. 마케팅 채널별 유저 획득
-```sql
-SELECT 
-    marketing_channel,
-    SUM(total_users) AS users,
-    SUM(d30_active) AS d30_retained
-FROM mart_user_cohort
-GROUP BY 1
-ORDER BY 2 DESC;
-```
+### 3. `column "plan_type" does not exist`
+- **원인:** 매출 마트(`mart_mrr_daily`)를 만들 때 결제 테이블(`fact_payments`)로 요금제별 집계를 시도했으나, 요금제 정보는 구독 테이블에만 존재.
+- **해결:** `fact_payments`와 `fact_subscriptions`를 `subscription_id`로 JOIN해 요금제를 연결.
 
 ---
 
-## 🛠️ 트러블슈팅
+## 이 프로젝트로 배운 것
 
-### Q. `docker-compose up`이 안 돼요
-```bash
-# Docker Compose 버전 확인
-docker-compose --version
-# 또는
-docker compose version
+- 실시간으로 쌓이는 데이터가 **PostgreSQL 같은 DBMS(운영 DB)**에 저장되는 구조를 이해했다.
+- **Airflow** 같은 데이터 파이프라인이 그 원본을 가공해, raw 테이블뿐 아니라 정리된 테이블(dim·fact)까지 **데이터웨어하우스**에 적재하는 흐름을 배웠다.
+- 그 데이터를 분석하기 쉽게 한 번 더 집계한 것이 **데이터 마트**이며, 질문별 최종 표가 여기 저장된다는 걸 알게 됐다.
+- 실무자는 **Metabase 같은 BI 툴에서 SQL로** 원하는 데이터를 뽑아 사업 분석용 대시보드를 만든다는 전체 사이클을 경험했다.
+- 파이프라인이 안 돌 때 **로그를 읽어 원인을 찾고 고치는 것**이 데이터 엔지니어링의 큰 부분임을 체감했다.
 
-# 메모리 부족 시 일부 서비스만 띄우기
-docker-compose up -d postgres-oltp postgres-warehouse metabase
-```
+## 다음 단계
 
-### Q. Airflow 초기화가 끝나지 않아요
-```bash
-# 로그 확인
-docker logs -f airflow-init
-
-# 재시도
-docker-compose down -v
-docker-compose up -d
-```
-
-### Q. 가짜 데이터 생성 스크립트가 컨테이너 안에 없어요
-```bash
-# 직접 복사
-docker cp scripts/generate_fake_data.py oltp-db:/tmp/generate.py
-docker exec -it oltp-db bash
-pip install psycopg2-binary faker pandas
-python3 /tmp/generate.py
-```
-
-### Q. Metabase에서 DB 연결이 안 돼요
-- `postgres-warehouse` 호스트명이 아닌, Docker 네트워크 내부 IP를 확인:
-  ```bash
-  docker network ls
-  docker network inspect subscription-data-pipeline_default
-  ```
-- Metabase 컨테이너가 `postgres-warehouse`와 같은 네트워크에 있는지 확인
-
----
-
-## 🎯 다음 단계 (확장 아이디어)
-
-| 단계 | 도전 과제 |
-|------|----------|
-| **중급** | Airflow DAG에 데이터 품질 체크 추가 (Great Expectations) |
-| **중급** | dbt를 도입해서 SQL 모델링 체계화 |
-| **고급** | Kafka로 실시간 스트리밍 파이프라인 추가 |
-| **고급** | Spark로 대용량 데이터 처리 (100GB+) |
-| **실무** | AWS/GCP에 동일 구조를 클라우드로 이관 |
-
----
-
-## 📚 참고 자료
-
-- [Apache Airflow 공식 문서](https://airflow.apache.org/docs/)
-- [DuckDB 공식 문서](https://duckdb.org/docs/)
-- [Metabase 학습 가이드](https://www.metabase.com/learn/)
-- [데이터 엔지니어링 Zoomcamp (무료)](https://github.com/DataTalksClub/data-engineering-zoomcamp)
-
----
-
-**이 프로젝트는 재무팀 출신이 데이터 엔지니어링으로 전환하는 데 필요한 전체 사이클을 경험할 수 있도록 설계되었습니다.**
+- [ ] 해지율·국가별 매출 차트를 추가해 대시보드 확장
+- [ ] dbt 도입으로 SQL 모델링 체계화
+- [ ] 데이터 품질 체크(Great Expectations) 추가
+- [ ] AWS/GCP로 클라우드 이관
